@@ -1,2 +1,8 @@
 *.o
 mdriver
+
+# Docker 관련
+.devcontainer/
+
+# VS Code 설정 (선택사항)
+.vscode/
