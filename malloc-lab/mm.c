@@ -72,6 +72,7 @@ team_t team = {
 /* heap의 시작 지점을 추적하는 포인터 (전역 변수) */
 static void *g_heap_listp;
 
+/* bp 주변 free block과 병합하는 함수 */
 static void* coalesce(void* bp)
 {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
@@ -109,6 +110,7 @@ static void* coalesce(void* bp)
     return bp;
 }
 
+/* heap 공간을 추가로 할당받는 함수 */
 static void* extend_heap(size_t words)
 {
     char* bp;
