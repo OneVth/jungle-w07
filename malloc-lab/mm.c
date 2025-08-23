@@ -159,10 +159,10 @@ int mm_init(void)
 }
 
 /* free list에서 할당 가능한 공간이 있는지 탐색하는 함수 */
-static void* find_fit(size_t asize)
+static void *find_fit(size_t asize)
 {
-    char* bp = NEXT_BLKP(g_heap_listp);
-    while(GET_SIZE(HDRP(bp)) != 0)
+    char *bp = NEXT_BLKP(g_heap_listp);
+    while (GET_SIZE(HDRP(bp)) != 0)
     {
         if (GET_SIZE(HDRP(bp)) >= asize && GET_ALLOC(HDRP(bp)) == 0)
         {
@@ -173,32 +173,35 @@ static void* find_fit(size_t asize)
     return NULL;
 }
 
-/* find_fit으로 찾은 공간에 메모리를 할당 */
-static void place(void* bp, size_t asize)
+/* find_fit으로 찾은 공간에 메모리를 할당하는 함수 */
+static void place(void *bp, size_t asize)
 {
     size_t csize = GET_SIZE(HDRP(bp));
-
-    PUT(HDRP(bp), PACK(asize, 1));
-    PUT(FTRP(bp), PACK(asize, 1));
 
     // 분할이 필요한 경우
     if ((csize - asize) >= 2 * DSIZE)
     {
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
         bp = NEXT_BLKP(bp);
         PUT(HDRP(bp), PACK(csize - asize, 0));
         PUT(FTRP(bp), PACK(csize - asize, 0));
     }
+    else
+    {
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+    }
 }
 
 /*
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- *     Always allocate a block whose size is a multiple of the alignment.
+ * mm_malloc - Implicit free list / First fit
  */
 void *mm_malloc(size_t size)
 {
     size_t asize;      /* Adjusted block size */
     size_t extendsize; /* Amount to extend heap if no fit */
-    char* bp;
+    char *bp;
 
     /* Ignore spurious requests */
     if (size == 0)
@@ -250,17 +253,65 @@ void mm_free(void *ptr)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
+    if (ptr == NULL)
+    {
+        return mm_malloc(size);
+    }
 
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
+    if (size == 0)
+    {
+        mm_free(ptr);
         return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-        copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
+    }
+
+    if (!GET_ALLOC(HDRP(ptr)))
+    {
+        return NULL;
+    }
+
+    size_t asize; /* Adjusted block size */
+
+    /* Adjust block size to include overhead and alignment reqs. */
+    if (size <= DSIZE)
+    {
+        asize = 2 * DSIZE;
+    }
+    else
+    {
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+    }
+
+    unsigned int old_size = GET_SIZE(HDRP(ptr));
+    if (asize <= old_size)
+    {
+        // Case #1: 요청 size가 현재 size보다 작은 경우
+        return ptr;
+    }
+
+    void *next_ptr = NEXT_BLKP(ptr);
+    unsigned int next_size = GET_SIZE(HDRP(next_ptr));
+    unsigned int combined_size = old_size + next_size;
+    if (GET_ALLOC(HDRP(next_ptr)) == 0 && combined_size >= asize)
+    {
+        // Case #2: next block이 free block인 경우,
+        // 현재 block의 size + next block의 size가 요청 size보다 큰 경우
+        PUT(HDRP(ptr), PACK(combined_size, 1));
+        PUT(FTRP(ptr), PACK(combined_size, 1));
+
+        return ptr;
+    }
+
+    // Case #3: 새로운 주소를 반환
+    void *new_ptr = mm_malloc(size);
+    if (new_ptr == NULL)
+    {
+        return NULL;
+    }
+
+    // 기존 데이터 복사
+    unsigned int copy_size = old_size - DSIZE;
+    memmove(new_ptr, ptr, copy_size);
+    mm_free(ptr);
+
+    return new_ptr;
 }
