@@ -73,14 +73,14 @@ team_t team = {
 static void *g_heap_listp;
 
 /* bp 주변 free block과 병합하는 함수 */
-static void* coalesce(void* bp)
+static void *coalesce(void *bp)
 {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
     size_t size = GET_SIZE(HDRP(bp));
 
     if (prev_alloc && next_alloc)
-    {   
+    {
         /* Case #1 */
         return bp;
     }
@@ -101,9 +101,10 @@ static void* coalesce(void* bp)
     }
     else
     {
+        /* Case #4 */
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        PUT(HDRP(NEXT_BLKP(bp)), PACK(size, 0));
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
 
@@ -111,9 +112,9 @@ static void* coalesce(void* bp)
 }
 
 /* heap 공간을 추가로 할당받는 함수 */
-static void* extend_heap(size_t words)
+static void *extend_heap(size_t words)
 {
-    char* bp;
+    char *bp;
     size_t size;
 
     /* Allocate an even number of words to maintain alignment */
@@ -150,11 +151,43 @@ int mm_init(void)
     g_heap_listp += (2 * WSIZE);
 
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
-    if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
+    if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
     {
         return -1;
     }
     return 0;
+}
+
+/* free list에서 할당 가능한 공간이 있는지 탐색하는 함수 */
+static void* find_fit(size_t asize)
+{
+    char* bp = NEXT_BLKP(g_heap_listp);
+    while(GET_SIZE(HDRP(bp)) != 0)
+    {
+        if (GET_SIZE(HDRP(bp)) >= asize && GET_ALLOC(HDRP(bp)) == 0)
+        {
+            return bp;
+        }
+        bp = NEXT_BLKP(bp);
+    }
+    return NULL;
+}
+
+/* find_fit으로 찾은 공간에 메모리를 할당 */
+static void place(void* bp, size_t asize)
+{
+    size_t csize = GET_SIZE(HDRP(bp));
+
+    PUT(HDRP(bp), PACK(asize, 1));
+    PUT(FTRP(bp), PACK(asize, 1));
+
+    // 분할이 필요한 경우
+    if ((csize - asize) >= 2 * DSIZE)
+    {
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(csize - asize, 0));
+        PUT(FTRP(bp), PACK(csize - asize, 0));
+    }
 }
 
 /*
@@ -163,15 +196,41 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
+    size_t asize;      /* Adjusted block size */
+    size_t extendsize; /* Amount to extend heap if no fit */
+    char* bp;
+
+    /* Ignore spurious requests */
+    if (size == 0)
+    {
         return NULL;
+    }
+
+    /* Adjust block size to include overhead and alignment reqs. */
+    if (size <= DSIZE)
+    {
+        asize = 2 * DSIZE;
+    }
     else
     {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
     }
+
+    /* Search the free list for a fit */
+    if ((bp = find_fit(asize)) != NULL)
+    {
+        place(bp, asize);
+        return bp;
+    }
+
+    /* No fit found. Get more memory and place the block */
+    extendsize = MAX(asize, CHUNKSIZE);
+    if ((bp = extend_heap(extendsize / WSIZE)) == NULL)
+    {
+        return NULL;
+    }
+    place(bp, asize);
+    return bp;
 }
 
 /*
@@ -179,6 +238,11 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
+    size_t size = GET_SIZE(HDRP(ptr));
+
+    PUT(HDRP(ptr), PACK(size, 0));
+    PUT(FTRP(ptr), PACK(size, 0));
+    coalesce(ptr);
 }
 
 /*
