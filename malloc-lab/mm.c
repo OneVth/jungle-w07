@@ -69,8 +69,15 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
-/* heap의 시작 지점을 추적하는 포인터 (전역 변수) */
+/* ****************************************** */
+
+/* heap의 시작 지점을 추적하는 포인터  */
 static void *g_heap_listp;
+
+/* 마지막으로 할당한 블록을 추적하는 포인터 */
+static void *g_last_bp;
+
+/* ****************************************** */
 
 /* bp 주변 free block과 병합하는 함수 */
 static void *coalesce(void *bp)
@@ -82,6 +89,7 @@ static void *coalesce(void *bp)
     if (prev_alloc && next_alloc)
     {
         /* Case #1 */
+        g_last_bp = bp;
         return bp;
     }
     else if (prev_alloc && !next_alloc)
@@ -108,6 +116,7 @@ static void *coalesce(void *bp)
         bp = PREV_BLKP(bp);
     }
 
+    g_last_bp = bp;
     return bp;
 }
 
@@ -149,6 +158,7 @@ int mm_init(void)
     PUT(g_heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); /* Prologue footer */
     PUT(g_heap_listp + (3 * WSIZE), PACK(0, 1));     /* Epilogue header */
     g_heap_listp += (2 * WSIZE);
+    g_last_bp = g_heap_listp;
 
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
@@ -194,6 +204,66 @@ static void place(void *bp, size_t asize)
     }
 }
 
+/* next-fit 메모리 할당 방식 구현 */
+static void *next_fit(size_t asize)
+{
+    void *bp = g_last_bp;
+    while (GET_SIZE(HDRP(bp)) > 0)
+    {
+        if (GET_ALLOC(HDRP(bp)) == 0 && GET_SIZE(HDRP(bp)) >= asize)
+        {
+            g_last_bp = bp;
+            return bp;
+        }
+        bp = NEXT_BLKP(bp);
+    }
+
+    bp = NEXT_BLKP(g_heap_listp);
+    while (bp < g_last_bp)
+    {
+        if (GET_ALLOC(HDRP(bp)) == 0 && GET_SIZE(HDRP(bp)) >= asize)
+        {
+            g_last_bp = bp;
+            return bp;
+        }
+        bp = NEXT_BLKP(bp);
+    }
+    return NULL;
+}
+
+/* best-fit 메모리 할당 방식 구현 */
+static void *best_fit(size_t asize)
+{
+    void *best_bp = NULL;
+    size_t min_gap = __SIZE_MAX__;
+
+    void *bp = NEXT_BLKP(g_heap_listp);
+    size_t csize;
+    while ((csize = GET_SIZE(HDRP(bp))) > 0)
+    {
+        if (GET_ALLOC(HDRP(bp)) == 0 && csize >= asize)
+        {
+            if (GET_SIZE(HDRP(bp)) == (unsigned int)asize)
+            {
+                return bp;
+            }
+            else
+            {
+                size_t gap = csize - asize;
+                if (gap < min_gap)
+                {
+                    min_gap = gap;
+                    best_bp = bp;
+                }
+            }
+        }
+
+        bp = NEXT_BLKP(bp);
+    }
+
+    return best_bp;
+}
+
 /*
  * mm_malloc - Implicit free list / First fit
  */
@@ -220,7 +290,7 @@ void *mm_malloc(size_t size)
     }
 
     /* Search the free list for a fit */
-    if ((bp = find_fit(asize)) != NULL)
+    if ((bp = best_fit(asize)) != NULL)
     {
         place(bp, asize);
         return bp;
@@ -245,7 +315,7 @@ void mm_free(void *ptr)
 
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
-    coalesce(ptr);
+    g_last_bp = coalesce(ptr);
 }
 
 /*
@@ -285,6 +355,22 @@ void *mm_realloc(void *ptr, size_t size)
     if (asize <= old_size)
     {
         // Case #1: 요청 size가 현재 size보다 작은 경우
+
+        // 분할이 필요한 경우
+        if ((old_size - asize) >= 2 * DSIZE)
+        {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+            void *next_ptr = NEXT_BLKP(ptr);
+            PUT(HDRP(next_ptr), PACK(old_size - asize, 0));
+            PUT(FTRP(next_ptr), PACK(old_size - asize, 0));
+        }
+        else
+        {
+            PUT(HDRP(ptr), PACK(old_size, 1));
+            PUT(FTRP(ptr), PACK(old_size, 1));
+        }
+        g_last_bp = ptr;
         return ptr;
     }
 
@@ -293,12 +379,31 @@ void *mm_realloc(void *ptr, size_t size)
     unsigned int combined_size = old_size + next_size;
     if (GET_ALLOC(HDRP(next_ptr)) == 0 && combined_size >= asize)
     {
-        // Case #2: next block이 free block인 경우,
+        // Case #2-1: next block이 free block인 경우,
         // 현재 block의 size + next block의 size가 요청 size보다 큰 경우
         PUT(HDRP(ptr), PACK(combined_size, 1));
         PUT(FTRP(ptr), PACK(combined_size, 1));
-
+        g_last_bp = ptr;
         return ptr;
+    }
+
+    void *prev_ptr = PREV_BLKP(ptr);
+    size_t prev_size = GET_SIZE(HDRP(prev_ptr));
+    combined_size = old_size + prev_size;
+    if (!GET_ALLOC(HDRP(prev_ptr)) && (combined_size >= asize))
+    {
+        // Case #2-2: prev block이 free block인 경우, (필요한가? 고민 필요)
+        // 현재 block의 size + next block의 size가 요청 size보다 큰 경우
+        memmove(prev_ptr, ptr, asize);
+
+        PUT(HDRP(prev_ptr), PACK(asize, 1));
+        PUT(FTRP(prev_ptr), PACK(asize, 1));
+        void *next_ptr = NEXT_BLKP(prev_ptr);
+        PUT(HDRP(next_ptr), PACK(combined_size - asize, 0));
+        PUT(FTRP(next_ptr), PACK(combined_size - asize, 0));
+
+        g_last_bp = prev_ptr;
+        return prev_ptr;
     }
 
     // Case #3: 새로운 주소를 반환
@@ -312,6 +417,5 @@ void *mm_realloc(void *ptr, size_t size)
     unsigned int copy_size = old_size - DSIZE;
     memmove(new_ptr, ptr, copy_size);
     mm_free(ptr);
-
     return new_ptr;
 }
